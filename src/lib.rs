@@ -3,9 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-pub use everscale_jrpc_client::{JrpcClientOptions, JrpcClient};
+pub use everscale_jrpc_client::{JrpcClient, JrpcClientOptions};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
-use nekoton::transport::models::{ExistingContract};
+use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::{
     config::FromClientConfig,
@@ -42,7 +42,7 @@ macro_rules! try_opt {
 }
 
 pub struct TransactionConsumer {
-    states_client: JrpcClient,
+    states_client: Option<JrpcClient>,
     topic: String,
     config: ClientConfig,
     skip_0_partition: bool,
@@ -55,7 +55,7 @@ pub struct ConsumerOptions<'opts> {
 }
 
 impl TransactionConsumer {
-    /// [states_rpc_endpoint] - list of endpoints of states rpcs without /rpc suffix
+    /// [states_rpc_endpoint] - list of endpoints of states rpcs with /rpc suffix
     pub async fn new<I>(
         group_id: &str,
         topic: &str,
@@ -63,17 +63,11 @@ impl TransactionConsumer {
         rpc_options: Option<JrpcClientOptions>,
         options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>>
-        where
-            I: IntoIterator<Item=Url>,
+    where
+        I: IntoIterator<Item = Url>,
     {
         let client = JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?;
-        Self::with_jrpc_client(
-            group_id,
-            topic,
-            client,
-            options,
-        )
-            .await
+        Self::with_jrpc_client(group_id, topic, client, options).await
     }
 
     pub async fn with_jrpc_client(
@@ -82,6 +76,27 @@ impl TransactionConsumer {
         states_client: JrpcClient,
         options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>> {
+        Ok(Arc::new(
+            Self::new_inner(group_id, topic, Some(states_client), options).await,
+        ))
+    }
+
+    pub async fn without_jrpc_client(
+        group_id: &str,
+        topic: &str,
+        options: ConsumerOptions<'_>,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(
+            Self::new_inner(group_id, topic, None, options).await,
+        ))
+    }
+
+    async fn new_inner(
+        group_id: &str,
+        topic: &str,
+        states_client: Option<JrpcClient>,
+        options: ConsumerOptions<'_>,
+    ) -> Self {
         let mut config = ClientConfig::default();
         config
             .set("group.id", group_id)
@@ -94,12 +109,12 @@ impl TransactionConsumer {
             config.set(k, v);
         }
 
-        Ok(Arc::new(Self {
+        Self {
             states_client,
             topic: topic.to_string(),
             config,
             skip_0_partition: options.skip_0_partition,
-        }))
+        }
     }
 
     fn subscribe(&self, stream_from: &StreamFrom) -> Result<Arc<StreamConsumer>> {
@@ -126,7 +141,7 @@ impl TransactionConsumer {
     pub async fn stream_transactions(
         &self,
         from: StreamFrom,
-    ) -> Result<impl Stream<Item=ConsumedTransaction>> {
+    ) -> Result<impl Stream<Item = ConsumedTransaction>> {
         let consumer = self.subscribe(&from)?;
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
@@ -182,7 +197,7 @@ impl TransactionConsumer {
     pub async fn stream_until_highest_offsets(
         &self,
         from: StreamFrom,
-    ) -> Result<(impl Stream<Item=ConsumedTransaction>, Offsets)> {
+    ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
@@ -328,9 +343,11 @@ impl TransactionConsumer {
         &self,
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
-        self.states_client
-            .get_contract_state(contract_address)
-            .await
+        if let Some(states_client) = &self.states_client {
+            states_client.get_contract_state(contract_address).await
+        } else {
+            anyhow::bail!("Missing states client")
+        }
     }
 
     pub async fn run_local(
@@ -339,12 +356,16 @@ impl TransactionConsumer {
         function: &ton_abi::Function,
         input: &[ton_abi::Token],
     ) -> Result<Option<nekoton_abi::ExecutionOutput>> {
-        self.states_client
-            .run_local(contract_address, function, input)
-            .await
+        if let Some(states_client) = &self.states_client {
+            states_client
+                .run_local(contract_address, function, input)
+                .await
+        } else {
+            anyhow::bail!("Missing states client")
+        }
     }
 
-    pub fn get_client(&self) -> &JrpcClient {
+    pub fn get_client(&self) -> &Option<JrpcClient> {
         &self.states_client
     }
 }
@@ -460,39 +481,48 @@ mod test {
 
     use ton_block::MsgAddressInt;
 
-    use crate::StatesClient;
+    use crate::{ConsumerOptions, TransactionConsumer};
 
     #[tokio::test]
     async fn test_get() {
-        let pr = StatesClient::new(["http://35.240.13.113:8081"], None)
-            .await
-            .unwrap();
+        let pr = TransactionConsumer::new(
+            "some_group",
+            "some_topic",
+            vec!["https://jrpc.everwallet.net/rpc".parse().unwrap()],
+            None,
+            ConsumerOptions {
+                kafka_options: Default::default(),
+                skip_0_partition: false,
+            },
+        )
+        .await
+        .unwrap();
 
         pr.get_contract_state(
             &MsgAddressInt::from_str(
                 "0:8e2586602513e99a55fa2be08561469c7ce51a7d5a25977558e77ef2bc9387b4",
             )
-                .unwrap(),
+            .unwrap(),
         )
-            .await
-            .unwrap()
-            .unwrap();
+        .await
+        .unwrap()
+        .unwrap();
 
         pr.get_contract_state(
             &MsgAddressInt::from_str(
                 "-1:efd5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
             )
-                .unwrap(),
+            .unwrap(),
         )
-            .await
-            .unwrap()
-            .unwrap();
+        .await
+        .unwrap()
+        .unwrap();
         assert!(pr
             .get_contract_state(
                 &MsgAddressInt::from_str(
                     "-1:aaa5a14409a8a129686114fc092525fddd508f1ea56d1b649a3a695d3a5b188c",
                 )
-                    .unwrap(),
+                .unwrap(),
             )
             .await
             .unwrap()
