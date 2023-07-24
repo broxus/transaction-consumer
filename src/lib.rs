@@ -3,8 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-pub use everscale_rpc_client::jrpc::{JrpcClient};
-pub use everscale_rpc_client::{ClientOptions, Client};
+use everscale_rpc_client::{RpcClient, ClientOptions, ClientType};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -43,7 +42,7 @@ macro_rules! try_opt {
 }
 
 pub struct TransactionConsumer {
-    states_client: Option<JrpcClient>,
+    states_client: Option<RpcClient>,
     topic: String,
     config: ClientConfig,
     skip_0_partition: bool,
@@ -63,18 +62,19 @@ impl TransactionConsumer {
         states_rpc_endpoints: I,
         rpc_options: Option<ClientOptions>,
         options: ConsumerOptions<'_>,
+        client_type: ClientType,
     ) -> Result<Arc<Self>>
     where
         I: IntoIterator<Item = Url> + Send,
     {
-        let client = JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?;
+        let client = RpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default(), client_type).await?;
         Self::with_jrpc_client(group_id, topic, client, options).await
     }
 
     pub async fn with_jrpc_client(
         group_id: &str,
         topic: &str,
-        states_client: JrpcClient,
+        states_client: RpcClient,
         options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(
@@ -95,7 +95,7 @@ impl TransactionConsumer {
     async fn new_inner(
         group_id: &str,
         topic: &str,
-        states_client: Option<JrpcClient>,
+        states_client: Option<RpcClient>,
         options: ConsumerOptions<'_>,
     ) -> Self {
         let mut config = ClientConfig::default();
@@ -366,7 +366,7 @@ impl TransactionConsumer {
         }
     }
 
-    pub fn get_client(&self) -> &Option<JrpcClient> {
+    pub fn get_client(&self) -> &Option<RpcClient> {
         &self.states_client
     }
 }
@@ -479,6 +479,7 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
+    use everscale_rpc_client::ClientType;
 
     use ton_block::MsgAddressInt;
 
@@ -495,6 +496,7 @@ mod test {
                 kafka_options: Default::default(),
                 skip_0_partition: false,
             },
+            ClientType::Jrpc,
         )
         .await
         .unwrap();
