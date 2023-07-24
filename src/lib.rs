@@ -3,7 +3,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-pub use everscale_jrpc_client::{JrpcClient, JrpcClientOptions};
+pub use everscale_rpc_client::jrpc::{JrpcClient};
+pub use everscale_rpc_client::{ClientOptions, Client};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -60,11 +61,11 @@ impl TransactionConsumer {
         group_id: &str,
         topic: &str,
         states_rpc_endpoints: I,
-        rpc_options: Option<JrpcClientOptions>,
+        rpc_options: Option<ClientOptions>,
         options: ConsumerOptions<'_>,
     ) -> Result<Arc<Self>>
     where
-        I: IntoIterator<Item = Url>,
+        I: IntoIterator<Item = Url> + Send,
     {
         let client = JrpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?;
         Self::with_jrpc_client(group_id, topic, client, options).await
@@ -207,7 +208,7 @@ impl TransactionConsumer {
         let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
         let mut tpl = TopicPartitionList::new();
         for (part, _) in &highest_offsets {
-            if let Err(e) = tpl.add_partition_offset(&this.topic, *part as i32, Offset::Stored) {
+            if let Err(e) = tpl.add_partition_offset(&this.topic, *part, Offset::Stored) {
                 log::warn!("Failed to get stored offset for {}: {:?}", part, e);
                 continue;
             }
