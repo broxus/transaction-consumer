@@ -68,10 +68,10 @@ impl TransactionConsumer {
         I: IntoIterator<Item = Url> + Send,
     {
         let client = RpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default(), client_type).await?;
-        Self::with_jrpc_client(group_id, topic, client, options).await
+        Self::with_rpc_client(group_id, topic, client, options).await
     }
 
-    pub async fn with_jrpc_client(
+    pub async fn with_rpc_client(
         group_id: &str,
         topic: &str,
         states_client: RpcClient,
@@ -82,7 +82,7 @@ impl TransactionConsumer {
         ))
     }
 
-    pub async fn without_jrpc_client(
+    pub async fn without_rpc_client(
         group_id: &str,
         topic: &str,
         options: ConsumerOptions<'_>,
