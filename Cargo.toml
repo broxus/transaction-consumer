@@ -19,7 +19,7 @@ ton_block = { git = "https://github.com/broxus/ton-labs-block" }
 ton_types = { git = "https://github.com/broxus/ton-labs-types" }
 
 ton-block-compressor = { git = "https://github.com/broxus/ton-block-compressor" }
-everscale-jrpc-client = { git = "https://github.com/broxus/everscale-jrpc.git" }
+everscale-rpc-client = { git = "https://github.com/broxus/everscale-jrpc.git" }
 
 [target.'cfg(target_os = "macos")'.dependencies.rdkafka]
 features = ["gssapi-vendored", "sasl"]
