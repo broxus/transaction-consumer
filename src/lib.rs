@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use everscale_rpc_client::{RpcClient, ClientOptions, ClientType};
+use everscale_rpc_client::{RpcClient, ClientOptions};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -62,12 +62,11 @@ impl TransactionConsumer {
         states_rpc_endpoints: I,
         rpc_options: Option<ClientOptions>,
         options: ConsumerOptions<'_>,
-        client_type: ClientType,
     ) -> Result<Arc<Self>>
     where
-        I: IntoIterator<Item = Url> + Send,
+        I: IntoIterator<Item = Url> + Send + Clone,
     {
-        let client = RpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default(), client_type).await?;
+        let client = RpcClient::new(states_rpc_endpoints, rpc_options.unwrap_or_default()).await?;
         Self::with_rpc_client(group_id, topic, client, options).await
     }
 
@@ -479,7 +478,6 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
-    use everscale_rpc_client::ClientType;
 
     use ton_block::MsgAddressInt;
 
@@ -496,7 +494,6 @@ mod test {
                 kafka_options: Default::default(),
                 skip_0_partition: false,
             },
-            ClientType::Jrpc,
         )
         .await
         .unwrap();
