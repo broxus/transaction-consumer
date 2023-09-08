@@ -344,7 +344,7 @@ impl TransactionConsumer {
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
         if let Some(states_client) = &self.states_client {
-            states_client.get_contract_state(contract_address).await
+            states_client.get_contract_state(contract_address, None).await
         } else {
             anyhow::bail!("Missing states client")
         }
