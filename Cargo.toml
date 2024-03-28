@@ -1,13 +1,13 @@
 [package]
 edition = "2021"
 name = "transaction-consumer"
-version = "0.17.0"
+version = "0.17.1"
 
 [dependencies]
 anyhow = "1"
 futures = "0.3"
 log = "0.4.14"
-rdkafka = { version = "0.33.2", features = ["gssapi-vendored", "sasl", ] }
+rdkafka = { version = "0.36.2", features = ["gssapi", "sasl", ] }
 url = "2.2.2"
 tokio = { version = "1.17", features = ["sync", "fs", "rt", "macros"] }
 
@@ -21,6 +21,11 @@ ton_types = { git = "https://github.com/broxus/ton-labs-types" }
 ton-block-compressor = { git = "https://github.com/broxus/ton-block-compressor" }
 everscale-rpc-client = { git = "https://github.com/broxus/everscale-jrpc.git" }
 
+[features]
+vendored = ["rdkafka/gssapi-vendored"]
+default = ["vendored"]
+
+
 [target.'cfg(target_os = "macos")'.dependencies.rdkafka]
 features = ["gssapi-vendored", "sasl"]
-version = "0.33.2"
+version = "0.36.2"
