@@ -2,8 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use crate::models::GqlTransaction;
 use anyhow::{Context, Result};
-use everscale_rpc_client::{RpcClient, ClientOptions};
+use everscale_rpc_client::{ClientOptions, RpcClient};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -13,9 +14,9 @@ use rdkafka::{
     ClientConfig, Message, Offset, TopicPartitionList,
 };
 use ton_block::{Deserializable, MsgAddressInt};
-use ton_block_compressor::ZstdWrapper;
-use ton_types::UInt256;
 use url::Url;
+
+mod models;
 
 macro_rules! try_res {
     ($some:expr, $msg:literal) => {
@@ -148,28 +149,20 @@ impl TransactionConsumer {
 
         log::info!("Starting streaming");
         tokio::spawn(async move {
-            let mut decompressor = ZstdWrapper::new();
             let stream = consumer.stream();
             tokio::pin!(stream);
             while let Some(message) = stream.next().await {
                 let message = try_res!(message, "Failed to get message");
                 let payload = try_opt!(message.payload(), "no payload");
-                let payload_decompressed = try_res!(
-                    decompressor.decompress(payload),
-                    "Failed decompressing block data"
-                );
-
-                tokio::task::yield_now().await;
-
+                let data: GqlTransaction =
+                    try_res!(serde_json::from_slice(payload), "Failed to parse json");
                 let transaction = try_res!(
-                    ton_block::Transaction::construct_from_bytes(payload_decompressed),
-                    "Failed constructing block"
+                    ton_block::Transaction::construct_from_base64(&data.boc),
+                    "Failed to parse boc"
                 );
-                let key = try_opt!(message.key(), "No key");
-                let key = UInt256::from_slice(key);
 
                 let (block, rx) = ConsumedTransaction::new(
-                    key,
+                    data.chain_order,
                     transaction,
                     message.offset(),
                     message.partition(),
@@ -279,28 +272,22 @@ impl TransactionConsumer {
                 let stream = consumer.stream();
                 tokio::pin!(stream);
 
-                let mut decompressor = ZstdWrapper::new();
+                // let mut decompressor = ZstdWrapper::new();
 
                 while let Some(message) = stream.next().await {
                     let message = try_res!(message, "Failed to get message");
 
                     let payload = try_opt!(message.payload(), "no payload");
-                    let payload_decompressed = try_res!(
-                        decompressor.decompress(payload),
-                        "Failed decompressing block data"
+                    let data: GqlTransaction =
+                        try_res!(serde_json::from_slice(payload), "Failed to parse json");
+                    let transaction = try_res!(
+                        ton_block::Transaction::construct_from_base64(&data.boc),
+                        "Failed to parse boc"
                     );
-
                     tokio::task::yield_now().await;
 
-                    let transaction = try_res!(
-                        ton_block::Transaction::construct_from_bytes(payload_decompressed),
-                        "Failed constructing block"
-                    );
-                    let key = try_opt!(message.key(), "No key");
-                    let key = UInt256::from_slice(key);
-
                     let (block, rx) = ConsumedTransaction::new(
-                        key,
+                        data.chain_order,
                         transaction,
                         message.offset(),
                         message.partition(),
@@ -344,7 +331,9 @@ impl TransactionConsumer {
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
         if let Some(states_client) = &self.states_client {
-            states_client.get_contract_state(contract_address, None).await
+            states_client
+                .get_contract_state(contract_address, None)
+                .await
         } else {
             anyhow::bail!("Missing states client")
         }
@@ -367,6 +356,10 @@ impl TransactionConsumer {
 
     pub fn get_client(&self) -> &Option<RpcClient> {
         &self.states_client
+    }
+
+    pub fn get_kafka_options(&self) -> &ClientConfig {
+        &self.config
     }
 }
 
@@ -393,7 +386,7 @@ impl StreamFrom {
 pub struct Offsets(pub HashMap<i32, i64>);
 
 pub struct ConsumedTransaction {
-    pub id: UInt256,
+    pub chain_order: String,
     pub transaction: ton_block::Transaction,
 
     pub offset: i64,
@@ -403,7 +396,7 @@ pub struct ConsumedTransaction {
 
 impl ConsumedTransaction {
     fn new(
-        id: UInt256,
+        chain_order: String,
         transaction: ton_block::Transaction,
         offset: i64,
         partition: i32,
@@ -411,7 +404,7 @@ impl ConsumedTransaction {
         let (tx, rx) = oneshot::channel();
         (
             Self {
-                id,
+                chain_order,
                 transaction,
                 offset,
                 partition,
@@ -429,8 +422,8 @@ impl ConsumedTransaction {
         Ok(())
     }
 
-    pub fn into_inner(self) -> (UInt256, ton_block::Transaction) {
-        (self.id, self.transaction)
+    pub fn into_inner(self) -> (String, ton_block::Transaction) {
+        (self.chain_order, self.transaction)
     }
 }
 
