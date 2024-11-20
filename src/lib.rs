@@ -198,8 +198,9 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
+        log::debug!("Starting stream_until_highest_offsets");
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
-
+        log::debug!("Consumer created");
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
         let this = self;
@@ -212,8 +213,11 @@ impl TransactionConsumer {
                 continue;
             }
         }
+        log::debug!("Partitions added to tpl");
         let stored = consumer.committed_offsets(tpl, None)?;
+        log::debug!("Stored commited offsets");
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
+        log::debug!("Stored elements for topic");
 
         let offsets = Offsets(HashMap::from_iter(
             highest_offsets
@@ -221,6 +225,7 @@ impl TransactionConsumer {
                 .copied()
                 .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
         ));
+        log::debug!("Offsets created");
 
         drop(consumer);
         for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
@@ -260,9 +265,12 @@ impl TransactionConsumer {
                     highest_offset
                 );
             }
+            log::debug!("Creating consumer for partition {}", part);
 
             let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
+            log::debug!("Consumer created");
             let mut tx = tx.clone();
+            log::debug!("Creating tpl");
             let mut tpl = TopicPartitionList::new();
             let ofset = match from.get_offset(part) {
                 Some(of) => of,
@@ -273,7 +281,9 @@ impl TransactionConsumer {
             };
 
             tpl.add_partition_offset(&this.topic, part, ofset)?;
+            log::debug!("Added partition to tpl");
             consumer.assign(&tpl)?;
+            log::debug!("Assigned tpl");
 
             tokio::spawn(async move {
                 let stream = consumer.stream();
@@ -335,7 +345,9 @@ impl TransactionConsumer {
                     log::debug!("Stored offsets");
                 }
             });
+            log::debug!("Spawned task for partition {}", part);
         }
+        log::debug!("Returning rx");
         Ok((rx, offsets))
     }
 
@@ -460,18 +472,21 @@ fn get_latest_offsets<X: ConsumerContext, C: Consumer<X>>(
     topic_name: &str,
     skip_0_partition: bool,
 ) -> Result<Vec<(i32, i64)>> {
+    log::debug!("Getting latest offsets for {}", topic_name);
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
+    log::debug!("Get topic partition count: {}", topic_partition_count);
     let mut parts_info = Vec::with_capacity(topic_partition_count);
     let start = if skip_0_partition { 1 } else { 0 };
 
     for part in start..topic_partition_count {
+        log::debug!("Getting offset for partition {}", part);
         let offset = consumer
             .fetch_watermarks(topic_name, part as i32, Duration::from_secs(30))
             .with_context(|| format!("Failed to fetch offset {}", part))?
             .1;
         parts_info.push((part as i32, offset));
     }
-
+    log::debug!("Got latest offsets");
     Ok(parts_info)
 }
 
