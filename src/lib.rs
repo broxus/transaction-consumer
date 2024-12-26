@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use everscale_rpc_client::{RpcClient, ClientOptions};
+use everscale_rpc_client::{ClientOptions, RpcClient};
 use futures::{channel::oneshot, SinkExt, Stream, StreamExt};
 use nekoton::transport::models::ExistingContract;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -356,7 +356,9 @@ impl TransactionConsumer {
         contract_address: &MsgAddressInt,
     ) -> Result<Option<ExistingContract>> {
         if let Some(states_client) = &self.states_client {
-            states_client.get_contract_state(contract_address, None).await
+            states_client
+                .get_contract_state(contract_address, None)
+                .await
         } else {
             anyhow::bail!("Missing states client")
         }
@@ -443,6 +445,12 @@ impl ConsumedTransaction {
 
     pub fn into_inner(self) -> (UInt256, ton_block::Transaction) {
         (self.id, self.transaction)
+    }
+
+    pub fn into_inner_with_commit_channel(
+        self,
+    ) -> (UInt256, ton_block::Transaction, oneshot::Sender<()>) {
+        (self.id, self.transaction, self.commit_channel.unwrap())
     }
 }
 
