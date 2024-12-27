@@ -351,6 +351,213 @@ impl TransactionConsumer {
         Ok((rx, offsets))
     }
 
+    pub async fn stream_until_highest_offsets_with_manual_commit(
+        &self,
+        from: StreamFrom,
+    ) -> Result<(impl Stream<Item = ConsumedTransactionWithMessage>, Offsets)> {
+        log::debug!("Starting stream_until_highest_offsets");
+        let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
+        log::debug!("Consumer created");
+        let (tx, rx) = futures::channel::mpsc::channel(1);
+
+        let this = self;
+
+        let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
+        let mut tpl = TopicPartitionList::new();
+        for (partition, _) in &highest_offsets {
+            if let Err(e) = tpl.add_partition_offset(&this.topic, *partition, Offset::Stored) {
+                log::warn!("Failed to get stored offset for {partition}: {e:?}");
+                continue;
+            }
+        }
+        log::debug!("Partitions added to tpl");
+        let stored = consumer.committed_offsets(tpl, None)?;
+        log::debug!("Stored commited offsets");
+        let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
+        log::debug!("Stored elements for topic");
+
+        let offsets = Offsets(HashMap::from_iter(
+            highest_offsets
+                .iter()
+                .copied()
+                .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
+        ));
+        log::debug!("Offsets created");
+
+        drop(consumer);
+        for (partition, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
+            let commited_offset = if let &StreamFrom::Stored = &from {
+                stored
+                    .iter()
+                    .find(|p| p.partition() == partition)
+                    .map(|x| x.offset())
+            } else {
+                None
+            };
+
+            // check if we have to skip this partition
+            if let Some(Offset::Offset(offset)) = commited_offset {
+                if offset >= highest_offset {
+                    log::warn!(
+                        "Stored offset is equal to highest offset: {offset} == {highest_offset}. Part: {partition}",
+                    );
+                    continue;
+                }
+            }
+
+            if highest_offset == 0 {
+                log::warn!("Skipping partition {partition}. Highest offset: {highest_offset}",);
+                continue;
+            } else {
+                log::warn!(
+                    "Starting stream for partition {partition}. Highest offset: {highest_offset}",
+                );
+            }
+            log::debug!("Creating consumer for partition {partition}");
+
+            let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
+            log::debug!("Consumer created");
+            let mut tx = tx.clone();
+            log::debug!("Creating tpl");
+            let mut tpl = TopicPartitionList::new();
+            let Some(offset_for_partition) = from.get_offset(partition) else {
+                log::warn!("No offset for partition {partition}");
+                continue;
+            };
+
+            tpl.add_partition_offset(&this.topic, partition, offset_for_partition)?;
+            log::debug!("Added partition to tpl");
+            consumer.assign(&tpl)?;
+            log::debug!("Assigned tpl");
+
+            tokio::spawn({
+                let consumer = Arc::new(consumer);
+                async move {
+                    let stream = consumer.stream();
+                    tokio::pin!(stream);
+
+                    let mut decompressor = ZstdWrapper::new();
+
+                    while let Some(message) = stream.next().await {
+                        let message = try_res!(message, "Failed to get message");
+
+                        let payload = try_opt!(message.payload(), "No payload");
+                        let payload_decompressed = try_res!(
+                            decompressor.decompress(payload),
+                            "Failed decompressing block data"
+                        );
+
+                        tokio::task::yield_now().await;
+
+                        let transaction = try_res!(
+                            ton_block::Transaction::construct_from_bytes(payload_decompressed),
+                            "Failed constructing block"
+                        );
+                        let key = try_opt!(message.key(), "No key");
+                        let key = UInt256::from_slice(key);
+
+                        let consumed_transaction = ConsumedTransactionWithMessage::new(
+                            key,
+                            transaction,
+                            message.offset(),
+                            message.partition(),
+                            consumer.clone(),
+                        );
+                        if let Err(e) = tx.send(consumed_transaction).await {
+                            log::error!("Failed sending via channel: {:?}", e); //todo panic?
+                            return;
+                        }
+
+                        let offset = message.offset();
+                        if offset >= highest_offset {
+                            log::info!(
+                            "Received message with higher offset than highest: {offset} >= {highest_offset}. Partition: {partition}",
+                            );
+                            if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
+                                log::error!("Failed committing final message: {:?}", e);
+                            }
+                            break;
+                        }
+
+                        log::debug!("Stored offsets");
+                    }
+                }
+            });
+            log::debug!("Spawned task for partition {partition}",);
+        }
+        log::debug!("Returning rx");
+        Ok((rx, offsets))
+    }
+
+    pub async fn stream_with_manual_commit(
+        &self,
+        from: StreamFrom,
+        offsets: Offsets,
+    ) -> Result<impl Stream<Item = ConsumedTransactionWithMessage>> {
+        log::debug!("Starting stream_from_offsets");
+        let (tx, rx) = futures::channel::mpsc::channel(1);
+
+        let this = self;
+
+        for partition in offsets.0.keys() {
+            log::debug!("Creating consumer for partition {partition}");
+
+            let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
+            let mut tx = tx.clone();
+            let mut tpl = TopicPartitionList::new();
+            let Some(offset_for_partition) = from.get_offset(*partition) else {
+                log::warn!("No offset for partition {partition}");
+                continue;
+            };
+            tpl.add_partition_offset(&this.topic, *partition, offset_for_partition)?;
+            consumer.assign(&tpl)?;
+
+            tokio::spawn({
+                let consumer = Arc::new(consumer);
+                async move {
+                    let stream = consumer.stream();
+                    tokio::pin!(stream);
+
+                    let mut decompressor = ZstdWrapper::new();
+
+                    while let Some(message) = stream.next().await {
+                        let message = try_res!(message, "Failed to get message");
+
+                        let payload = try_opt!(message.payload(), "no payload");
+                        let payload_decompressed = try_res!(
+                            decompressor.decompress(payload),
+                            "Failed decompressing block data"
+                        );
+
+                        tokio::task::yield_now().await;
+
+                        let transaction = try_res!(
+                            ton_block::Transaction::construct_from_bytes(payload_decompressed),
+                            "Failed constructing block"
+                        );
+                        let key = try_opt!(message.key(), "No key");
+                        let key = UInt256::from_slice(key);
+
+                        let consumed_transaction = ConsumedTransactionWithMessage::new(
+                            key,
+                            transaction,
+                            message.offset(),
+                            message.partition(),
+                            consumer.clone(),
+                        );
+                        if let Err(e) = tx.send(consumed_transaction).await {
+                            log::error!("Failed sending via channel: {:?}", e); //todo panic?
+                            return;
+                        }
+                    }
+                }
+            });
+            log::debug!("Spawned task for partition {partition}");
+        }
+        log::debug!("Returning rx");
+        Ok(rx)
+    }
+
     pub async fn get_contract_state(
         &self,
         contract_address: &MsgAddressInt,
@@ -451,6 +658,51 @@ impl ConsumedTransaction {
         self,
     ) -> (UInt256, ton_block::Transaction, oneshot::Sender<()>) {
         (self.id, self.transaction, self.commit_channel.unwrap())
+    }
+}
+
+pub struct ConsumedMessage {
+    pub offset: i64,
+    pub partition: i32,
+    consumer: Arc<StreamConsumer>,
+}
+
+impl ConsumedMessage {
+    pub fn commit(&self, offset: i64, partition: i32, topic: &str) -> Result<()> {
+        self.consumer
+            .store_offset(topic, partition, offset)
+            .map_err(|_| anyhow::anyhow!("Failed committing"))?;
+        Ok(())
+    }
+}
+
+pub struct ConsumedTransactionWithMessage {
+    pub id: UInt256,
+    pub transaction: ton_block::Transaction,
+    pub message: ConsumedMessage,
+}
+
+impl ConsumedTransactionWithMessage {
+    fn new(
+        id: UInt256,
+        transaction: ton_block::Transaction,
+        offset: i64,
+        partition: i32,
+        consumer: Arc<StreamConsumer>,
+    ) -> Self {
+        Self {
+            id,
+            transaction,
+            message: ConsumedMessage {
+                offset,
+                partition,
+                consumer,
+            },
+        }
+    }
+
+    pub fn into_inner(self) -> (UInt256, ton_block::Transaction, ConsumedMessage) {
+        (self.id, self.transaction, self.message)
     }
 }
 
