@@ -663,10 +663,10 @@ pub struct ConsumedMessage {
 }
 
 impl ConsumedMessage {
-    pub fn commit(&self, offset: i64, partition: i32, topic: &str) -> Result<()> {
+    pub fn store_offset(&self, offset: i64, partition: i32, topic: &str) -> Result<()> {
         self.consumer
             .store_offset(topic, partition, offset)
-            .map_err(|_| anyhow::anyhow!("Failed committing"))?;
+            .map_err(|e| anyhow::anyhow!("Store_offset Failed: {e}"))?;
         Ok(())
     }
 }
