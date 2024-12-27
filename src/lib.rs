@@ -491,25 +491,20 @@ impl TransactionConsumer {
 
     pub async fn stream_with_manual_commit(
         &self,
-        from: StreamFrom,
         offsets: Offsets,
     ) -> Result<impl Stream<Item = ConsumedTransactionWithMessage>> {
-        log::debug!("Starting stream_from_offsets");
+        log::debug!("Starting stream_with_manual_commit");
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
         let this = self;
 
-        for partition in offsets.0.keys() {
+        for (partition, offset_for_partition) in offsets.0 {
             log::debug!("Creating consumer for partition {partition}");
 
             let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
             let mut tx = tx.clone();
             let mut tpl = TopicPartitionList::new();
-            let Some(offset_for_partition) = from.get_offset(*partition) else {
-                log::warn!("No offset for partition {partition}");
-                continue;
-            };
-            tpl.add_partition_offset(&this.topic, *partition, offset_for_partition)?;
+            tpl.add_partition_offset(&this.topic, partition, Offset::Offset(offset_for_partition))?;
             consumer.assign(&tpl)?;
 
             tokio::spawn({
