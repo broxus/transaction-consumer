@@ -659,7 +659,7 @@ impl ConsumedTransaction {
 pub struct ConsumedMessage {
     pub offset: i64,
     pub partition: i32,
-    consumer: Arc<StreamConsumer>,
+    pub consumer: Arc<StreamConsumer>,
 }
 
 impl ConsumedMessage {
