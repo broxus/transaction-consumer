@@ -659,14 +659,14 @@ impl ConsumedTransaction {
 pub struct ConsumedMessage {
     pub offset: i64,
     pub partition: i32,
-    pub consumer: Arc<StreamConsumer>,
+    consumer: Arc<StreamConsumer>,
 }
 
 impl ConsumedMessage {
-    pub fn store_offset(&self, offset: i64, partition: i32, topic: &str) -> Result<()> {
+    pub fn store_offset(&self, topic: &str) -> Result<()> {
         self.consumer
-            .store_offset(topic, partition, offset)
-            .map_err(|e| anyhow::anyhow!("Store_offset Failed: {e}"))?;
+            .store_offset(topic, self.partition, self.offset)
+            .map_err(|e| anyhow::anyhow!("Store offset Failed: {e}"))?;
         Ok(())
     }
 }
