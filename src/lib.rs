@@ -43,7 +43,7 @@ macro_rules! try_opt {
 
 pub struct TransactionConsumer {
     states_client: Option<RpcClient>,
-    topic: String,
+    pub topic: String,
     config: ClientConfig,
     skip_0_partition: bool,
 }
