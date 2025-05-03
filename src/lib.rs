@@ -198,14 +198,29 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
-        log::debug!("Starting stream_until_highest_offsets");
-        let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
-        log::debug!("Consumer created");
+        log::info!("Starting stream_until_highest_offsets {:?}", from);
+
         let (tx, rx) = futures::channel::mpsc::channel(1);
+        let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
+        let highest_offsets = get_latest_offsets(&consumer, &self.topic, self.skip_0_partition)?;
+
+        let offsets = Offsets(HashMap::from_iter(
+            highest_offsets
+                .iter()
+                .copied()
+                .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
+        ));
+
+        if matches!(from, StreamFrom::End) {
+            log::warn!(
+                "Stream from the end will be stuck until the first produced block in the partition"
+            );
+            return Ok((rx, offsets));
+        }
+        log::debug!("Consumer created");
 
         let this = self;
 
-        let highest_offsets = get_latest_offsets(&consumer, &this.topic, self.skip_0_partition)?;
         let mut tpl = TopicPartitionList::new();
         for (part, _) in &highest_offsets {
             if let Err(e) = tpl.add_partition_offset(&this.topic, *part, Offset::Stored) {
@@ -218,14 +233,6 @@ impl TransactionConsumer {
         log::debug!("Stored commited offsets");
         let stored: Vec<TopicPartitionListElem> = stored.elements_for_topic(&this.topic);
         log::debug!("Stored elements for topic");
-
-        let offsets = Offsets(HashMap::from_iter(
-            highest_offsets
-                .iter()
-                .copied()
-                .map(|(k, v)| (k, v.checked_sub(1).unwrap_or(0))),
-        ));
-        log::debug!("Offsets created");
 
         drop(consumer);
         for (part, highest_offset) in offsets.0.iter().map(|(k, v)| (*k, *v)) {
