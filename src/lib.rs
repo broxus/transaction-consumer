@@ -389,18 +389,25 @@ impl TransactionConsumer {
         drop(consumer);
         for watermark in watermarks {
             let partition = watermark.partition;
-            let committed_offset = if matches!(from, StreamFrom::Stored) {
-                stored.get(&partition).copied()
+            let plan = if matches!(from, StreamFrom::End) {
+                // Preserve legacy End behavior in manual-commit mode:
+                // consume first new message (if any) per partition, then stop that partition.
+                Some(build_tail_like_plan_for_end(watermark.high))
             } else {
-                None
+                let committed_offset = if matches!(from, StreamFrom::Stored) {
+                    stored.get(&partition).copied()
+                } else {
+                    None
+                };
+                build_partition_stream_plan(
+                    &from,
+                    partition,
+                    watermark.low,
+                    watermark.high,
+                    committed_offset,
+                )
             };
-            let Some(plan) = build_partition_stream_plan(
-                &from,
-                partition,
-                watermark.low,
-                watermark.high,
-                committed_offset,
-            ) else {
+            let Some(plan) = plan else {
                 continue;
             };
 
@@ -735,10 +742,43 @@ fn build_partition_stream_plan(
         }
         StreamFrom::Stored => match committed_offset {
             Some(Offset::Offset(offset)) => offset,
-            Some(other) => {
+            Some(Offset::Invalid) => {
                 log::warn!(
-                    "Unexpected stored offset {:?} for partition {}. Falling back to low watermark {}",
-                    other,
+                    "Invalid stored offset for partition {}. Falling back to low watermark {}",
+                    partition,
+                    low
+                );
+                low
+            }
+            Some(Offset::Beginning) => {
+                log::warn!(
+                    "Stored offset marker Beginning for partition {}. Using low watermark {}",
+                    partition,
+                    low
+                );
+                low
+            }
+            Some(Offset::End) => {
+                log::warn!(
+                    "Stored offset marker End for partition {}. Using high watermark {}",
+                    partition,
+                    high
+                );
+                high
+            }
+            Some(Offset::OffsetTail(delta)) => {
+                let start = high.saturating_sub(delta);
+                log::warn!(
+                    "Stored offset marker OffsetTail({}) for partition {}. Using start {}",
+                    delta,
+                    partition,
+                    start
+                );
+                start
+            }
+            Some(Offset::Stored) => {
+                log::warn!(
+                    "Stored offset marker Stored for partition {}. Falling back to low watermark {}",
                     partition,
                     low
                 );
@@ -779,6 +819,13 @@ fn build_partition_stream_plan(
         start_offset,
         end_exclusive: high,
     })
+}
+
+fn build_tail_like_plan_for_end(high: i64) -> PartitionStreamPlan {
+    PartitionStreamPlan {
+        start_offset: high,
+        end_exclusive: high.saturating_add(1),
+    }
 }
 
 fn get_topic_partition_count<X: ConsumerContext, C: Consumer<X>>(
@@ -836,7 +883,8 @@ mod test {
     use ton_block::MsgAddressInt;
 
     use crate::{
-        build_partition_stream_plan, ConsumerOptions, Offsets, StreamFrom, TransactionConsumer,
+        build_partition_stream_plan, build_tail_like_plan_for_end, ConsumerOptions, Offsets,
+        StreamFrom, TransactionConsumer,
     };
 
     #[test]
@@ -872,6 +920,12 @@ mod test {
     }
 
     #[test]
+    fn planner_does_not_rewind_when_stored_offset_is_end_marker() {
+        let plan = build_partition_stream_plan(&StreamFrom::Stored, 1, 15, 30, Some(Offset::End));
+        assert!(plan.is_none());
+    }
+
+    #[test]
     fn planner_clamps_explicit_offset_to_low_watermark() {
         let plan = build_partition_stream_plan(
             &StreamFrom::Offsets(Offsets(HashMap::from([(7, 5)]))),
@@ -883,6 +937,13 @@ mod test {
         .expect("plan should be created");
         assert_eq!(plan.start_offset, 10);
         assert_eq!(plan.end_exclusive, 20);
+    }
+
+    #[test]
+    fn end_manual_plan_reads_first_new_message_only() {
+        let plan = build_tail_like_plan_for_end(42);
+        assert_eq!(plan.start_offset, 42);
+        assert_eq!(plan.end_exclusive, 43);
     }
 
     #[tokio::test]
