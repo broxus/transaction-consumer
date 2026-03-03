@@ -17,46 +17,12 @@ use ton_types::UInt256;
 use tracing::Instrument;
 use url::Url;
 
-pub mod tracing_setup;
-
-macro_rules! tc_error {
-    ($($arg:tt)*) => {{
-        ::tracing::error!($($arg)*);
-        #[cfg(feature = "log-compat")]
-        ::log::error!($($arg)*);
-    }};
-}
-
-macro_rules! tc_warn {
-    ($($arg:tt)*) => {{
-        ::tracing::warn!($($arg)*);
-        #[cfg(feature = "log-compat")]
-        ::log::warn!($($arg)*);
-    }};
-}
-
-macro_rules! tc_info {
-    ($($arg:tt)*) => {{
-        ::tracing::info!($($arg)*);
-        #[cfg(feature = "log-compat")]
-        ::log::info!($($arg)*);
-    }};
-}
-
-macro_rules! tc_debug {
-    ($($arg:tt)*) => {{
-        ::tracing::debug!($($arg)*);
-        #[cfg(feature = "log-compat")]
-        ::log::debug!($($arg)*);
-    }};
-}
-
 macro_rules! try_res {
     ($some:expr, $msg:literal) => {
         match $some {
             Ok(a) => a,
             Err(e) => {
-                tc_error!("{}:{:?}", $msg, e);
+                tracing::error!("{}:{:?}", $msg, e);
                 continue;
             }
         }
@@ -68,7 +34,7 @@ macro_rules! try_opt {
         match $some {
             Some(a) => a,
             None => {
-                tc_error!("{}", $msg);
+                tracing::error!("{}", $msg);
                 continue;
             }
         }
@@ -167,7 +133,7 @@ impl TransactionConsumer {
             )?;
         }
 
-        tc_info!("Assigning: {:?}", assignment);
+        tracing::info!("Assigning: {:?}", assignment);
         consumer.assign(&assignment)?;
         Ok(Arc::new(consumer))
     }
@@ -185,7 +151,7 @@ impl TransactionConsumer {
 
         let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
-        tc_info!("Starting streaming");
+        tracing::info!("Starting streaming");
         let topic = self.topic.clone();
         let from_kind = from.kind_for_span();
         let stream_span = tracing::info_span!(
@@ -222,7 +188,7 @@ impl TransactionConsumer {
                         message.partition(),
                     );
                     if let Err(e) = tx.send(block).await {
-                        tc_error!("Failed sending via channel: {:?}", e); //todo panic?
+                        tracing::error!("Failed sending via channel: {:?}", e); //todo panic?
                         return;
                     }
 
@@ -234,7 +200,7 @@ impl TransactionConsumer {
                         consumer.store_offset_from_message(&message),
                         "Failed committing"
                     );
-                    tc_debug!("Stored offsets");
+                    tracing::debug!("Stored offsets");
                 }
             }
             .instrument(stream_span),
@@ -252,7 +218,7 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransaction>, Offsets)> {
-        tc_info!("Starting stream_until_highest_offsets {:?}", from);
+        tracing::info!("Starting stream_until_highest_offsets {:?}", from);
 
         let (tx, rx) = futures::channel::mpsc::channel(1);
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
@@ -271,7 +237,7 @@ impl TransactionConsumer {
                 if let Err(e) =
                     tpl.add_partition_offset(&self.topic, watermark.partition, Offset::Stored)
                 {
-                    tc_warn!(
+                    tracing::warn!(
                         "Failed to get stored offset for {}: {:?}",
                         watermark.partition,
                         e
@@ -279,9 +245,9 @@ impl TransactionConsumer {
                     continue;
                 }
             }
-            tc_debug!("Partitions added to tpl");
+            tracing::debug!("Partitions added to tpl");
             let stored = consumer.committed_offsets(tpl, None)?;
-            tc_debug!("Stored commited offsets");
+            tracing::debug!("Stored commited offsets");
             stored
                 .elements_for_topic(&self.topic)
                 .iter()
@@ -290,7 +256,7 @@ impl TransactionConsumer {
         } else {
             HashMap::new()
         };
-        tc_debug!("Stored elements for topic");
+        tracing::debug!("Stored elements for topic");
 
         drop(consumer);
         let this = self;
@@ -312,23 +278,23 @@ impl TransactionConsumer {
                 continue;
             };
 
-            tc_warn!(
+            tracing::warn!(
                 "Starting stream for partition {}. Reading offsets [{}..{})",
                 part,
                 plan.start_offset,
                 plan.end_exclusive
             );
-            tc_debug!("Creating consumer for partition {}", part);
+            tracing::debug!("Creating consumer for partition {}", part);
 
             let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
-            tc_debug!("Consumer created");
+            tracing::debug!("Consumer created");
             let mut tx = tx.clone();
-            tc_debug!("Creating tpl");
+            tracing::debug!("Creating tpl");
             let mut tpl = TopicPartitionList::new();
             tpl.add_partition_offset(&this.topic, part, Offset::Offset(plan.start_offset))?;
-            tc_debug!("Added partition to tpl");
+            tracing::debug!("Added partition to tpl");
             consumer.assign(&tpl)?;
-            tc_debug!("Assigned tpl");
+            tracing::debug!("Assigned tpl");
 
             let topic = this.topic.clone();
             let partition_span = tracing::info_span!(
@@ -371,20 +337,20 @@ impl TransactionConsumer {
                             message.partition(),
                         );
                         if let Err(e) = tx.send(block).await {
-                            tc_error!("Failed sending via channel: {:?}", e); //todo panic?
+                            tracing::error!("Failed sending via channel: {:?}", e); //todo panic?
                             return;
                         }
 
                         let offset = message.offset();
                         if offset.saturating_add(1) >= plan.end_exclusive {
-                            tc_info!(
+                            tracing::info!(
                                 "Reached snapshot end: {} + 1 >= {}. Partition: {}",
                                 offset,
                                 plan.end_exclusive,
                                 part
                             );
                             if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
-                                tc_error!("Failed committing final message: {:?}", e);
+                                tracing::error!("Failed committing final message: {:?}", e);
                             }
                             break;
                         }
@@ -397,14 +363,14 @@ impl TransactionConsumer {
                             consumer.store_offset_from_message(&message),
                             "Failed committing"
                         );
-                        tc_debug!("Stored offsets");
+                        tracing::debug!("Stored offsets");
                     }
                 }
                 .instrument(partition_span),
             );
-            tc_debug!("Spawned task for partition {}", part);
+            tracing::debug!("Spawned task for partition {}", part);
         }
-        tc_debug!("Returning rx");
+        tracing::debug!("Returning rx");
         Ok((rx, offsets))
     }
 
@@ -417,9 +383,9 @@ impl TransactionConsumer {
         &self,
         from: StreamFrom,
     ) -> Result<(impl Stream<Item = ConsumedTransactionWithMessage>, Offsets)> {
-        tc_debug!("Starting stream_until_highest_offsets");
+        tracing::debug!("Starting stream_until_highest_offsets");
         let consumer: StreamConsumer = StreamConsumer::from_config(&self.config)?;
-        tc_debug!("Consumer created");
+        tracing::debug!("Consumer created");
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
         let watermarks = get_partition_watermarks(&consumer, &self.topic, self.skip_0_partition)?;
@@ -429,7 +395,7 @@ impl TransactionConsumer {
                 if let Err(e) =
                     tpl.add_partition_offset(&self.topic, watermark.partition, Offset::Stored)
                 {
-                    tc_warn!(
+                    tracing::warn!(
                         "Failed to get stored offset for {}: {:?}",
                         watermark.partition,
                         e
@@ -437,9 +403,9 @@ impl TransactionConsumer {
                     continue;
                 }
             }
-            tc_debug!("Partitions added to tpl");
+            tracing::debug!("Partitions added to tpl");
             let stored = consumer.committed_offsets(tpl, None)?;
-            tc_debug!("Stored commited offsets");
+            tracing::debug!("Stored commited offsets");
             stored
                 .elements_for_topic(&self.topic)
                 .iter()
@@ -448,7 +414,7 @@ impl TransactionConsumer {
         } else {
             HashMap::new()
         };
-        tc_debug!("Stored elements for topic");
+        tracing::debug!("Stored elements for topic");
 
         let offsets = Offsets(HashMap::from_iter(watermarks.iter().map(|watermark| {
             (
@@ -456,7 +422,7 @@ impl TransactionConsumer {
                 watermark.high.checked_sub(1).unwrap_or(0),
             )
         })));
-        tc_debug!("Offsets created");
+        tracing::debug!("Offsets created");
 
         let this = self;
         drop(consumer);
@@ -485,22 +451,22 @@ impl TransactionConsumer {
                 continue;
             };
 
-            tc_warn!(
+            tracing::warn!(
                 "Starting stream for partition {partition}. Reading offsets [{}..{})",
                 plan.start_offset,
                 plan.end_exclusive
             );
-            tc_debug!("Creating consumer for partition {partition}");
+            tracing::debug!("Creating consumer for partition {partition}");
 
             let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
-            tc_debug!("Consumer created");
+            tracing::debug!("Consumer created");
             let mut tx = tx.clone();
-            tc_debug!("Creating tpl");
+            tracing::debug!("Creating tpl");
             let mut tpl = TopicPartitionList::new();
             tpl.add_partition_offset(&this.topic, partition, Offset::Offset(plan.start_offset))?;
-            tc_debug!("Added partition to tpl");
+            tracing::debug!("Added partition to tpl");
             consumer.assign(&tpl)?;
-            tc_debug!("Assigned tpl");
+            tracing::debug!("Assigned tpl");
 
             let topic = this.topic.clone();
             let partition_span = tracing::info_span!(
@@ -545,30 +511,30 @@ impl TransactionConsumer {
                             consumer.clone(),
                         );
                         if let Err(e) = tx.send(consumed_transaction).await {
-                            tc_error!("Failed sending via channel: {:?}", e); //todo panic?
+                            tracing::error!("Failed sending via channel: {:?}", e); //todo panic?
                             return;
                         }
 
                         let offset = message.offset();
                         if offset.saturating_add(1) >= plan.end_exclusive {
-                            tc_info!(
+                            tracing::info!(
                                 "Reached snapshot end: {offset} + 1 >= {}. Partition: {partition}",
                                 plan.end_exclusive,
                             );
                             if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
-                                tc_error!("Failed committing final message: {:?}", e);
+                                tracing::error!("Failed committing final message: {:?}", e);
                             }
                             break;
                         }
 
-                        tc_debug!("Stored offsets");
+                        tracing::debug!("Stored offsets");
                     }
                 }
                 .instrument(partition_span)
             });
-            tc_debug!("Spawned task for partition {partition}",);
+            tracing::debug!("Spawned task for partition {partition}",);
         }
-        tc_debug!("Returning rx");
+        tracing::debug!("Returning rx");
         Ok((rx, offsets))
     }
 
@@ -581,13 +547,13 @@ impl TransactionConsumer {
         &self,
         offsets: Offsets,
     ) -> Result<impl Stream<Item = ConsumedTransactionWithMessage>> {
-        tc_debug!("Starting stream_with_manual_commit");
+        tracing::debug!("Starting stream_with_manual_commit");
         let (tx, rx) = futures::channel::mpsc::channel(1);
 
         let this = self;
 
         for (partition, offset_for_partition) in offsets.0 {
-            tc_debug!("Creating consumer for partition {partition}");
+            tracing::debug!("Creating consumer for partition {partition}");
 
             let consumer: StreamConsumer = StreamConsumer::from_config(&this.config)?;
             let mut tx = tx.clone();
@@ -636,16 +602,16 @@ impl TransactionConsumer {
                             consumer.clone(),
                         );
                         if let Err(e) = tx.send(consumed_transaction).await {
-                            tc_error!("Failed sending via channel: {:?}", e); //todo panic?
+                            tracing::error!("Failed sending via channel: {:?}", e); //todo panic?
                             return;
                         }
                     }
                 }
                 .instrument(partition_span)
             });
-            tc_debug!("Spawned task for partition {partition}");
+            tracing::debug!("Spawned task for partition {partition}");
         }
-        tc_debug!("Returning rx");
+        tracing::debug!("Returning rx");
         Ok(rx)
     }
 
@@ -827,7 +793,7 @@ fn build_partition_stream_plan(
     committed_offset: Option<Offset>,
 ) -> Option<PartitionStreamPlan> {
     if low >= high {
-        tc_warn!(
+        tracing::warn!(
             "Skipping partition {}. Empty snapshot range: low={}, high={}",
             partition,
             low,
@@ -841,7 +807,7 @@ fn build_partition_stream_plan(
         StreamFrom::End => high,
         StreamFrom::Offsets(offsets) => {
             let Some(offset) = offsets.0.get(&partition).copied() else {
-                tc_warn!("No offset for partition {}", partition);
+                tracing::warn!("No offset for partition {}", partition);
                 return None;
             };
             offset
@@ -849,7 +815,7 @@ fn build_partition_stream_plan(
         StreamFrom::Stored => match committed_offset {
             Some(Offset::Offset(offset)) => offset,
             Some(Offset::Invalid) => {
-                tc_warn!(
+                tracing::warn!(
                     "Invalid stored offset for partition {}. Falling back to low watermark {}",
                     partition,
                     low
@@ -857,7 +823,7 @@ fn build_partition_stream_plan(
                 low
             }
             Some(Offset::Beginning) => {
-                tc_warn!(
+                tracing::warn!(
                     "Stored offset marker Beginning for partition {}. Using low watermark {}",
                     partition,
                     low
@@ -865,7 +831,7 @@ fn build_partition_stream_plan(
                 low
             }
             Some(Offset::End) => {
-                tc_warn!(
+                tracing::warn!(
                     "Stored offset marker End for partition {}. Using high watermark {}",
                     partition,
                     high
@@ -874,7 +840,7 @@ fn build_partition_stream_plan(
             }
             Some(Offset::OffsetTail(delta)) => {
                 let start = high.saturating_sub(delta);
-                tc_warn!(
+                tracing::warn!(
                     "Stored offset marker OffsetTail({}) for partition {}. Using start {}",
                     delta,
                     partition,
@@ -883,7 +849,7 @@ fn build_partition_stream_plan(
                 start
             }
             Some(Offset::Stored) => {
-                tc_warn!(
+                tracing::warn!(
                     "Stored offset marker Stored for partition {}. Falling back to low watermark {}",
                     partition,
                     low
@@ -891,7 +857,7 @@ fn build_partition_stream_plan(
                 low
             }
             None => {
-                tc_warn!(
+                tracing::warn!(
                     "No stored offset for partition {}. Falling back to low watermark {}",
                     partition,
                     low
@@ -902,7 +868,7 @@ fn build_partition_stream_plan(
     };
 
     if start_offset < low {
-        tc_warn!(
+        tracing::warn!(
             "Clamping start offset for partition {} from {} to low watermark {}",
             partition,
             start_offset,
@@ -912,7 +878,7 @@ fn build_partition_stream_plan(
     }
 
     if start_offset >= high {
-        tc_warn!(
+        tracing::warn!(
             "Skipping partition {}. Already synced for snapshot: start={}, high={}",
             partition,
             start_offset,
@@ -960,14 +926,14 @@ fn get_partition_watermarks<X: ConsumerContext, C: Consumer<X>>(
     topic_name: &str,
     skip_0_partition: bool,
 ) -> Result<Vec<PartitionWatermark>> {
-    tc_debug!("Getting partition watermarks for {}", topic_name);
+    tracing::debug!("Getting partition watermarks for {}", topic_name);
     let topic_partition_count = get_topic_partition_count(consumer, topic_name)?;
-    tc_debug!("Get topic partition count: {}", topic_partition_count);
+    tracing::debug!("Get topic partition count: {}", topic_partition_count);
     let mut parts_info = Vec::with_capacity(topic_partition_count);
     let start = if skip_0_partition { 1 } else { 0 };
 
     for part in start..topic_partition_count {
-        tc_debug!("Getting watermarks for partition {}", part);
+        tracing::debug!("Getting watermarks for partition {}", part);
         let (low, high) = consumer
             .fetch_watermarks(topic_name, part as i32, Duration::from_secs(30))
             .with_context(|| format!("Failed to fetch offset {}", part))?;
@@ -977,7 +943,7 @@ fn get_partition_watermarks<X: ConsumerContext, C: Consumer<X>>(
             high,
         });
     }
-    tc_debug!("Got partition watermarks");
+    tracing::debug!("Got partition watermarks");
     Ok(parts_info)
 }
 
