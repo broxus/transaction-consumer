@@ -214,6 +214,72 @@ impl TransactionConsumer {
         skip(self),
         fields(topic = %self.topic, from = %from.kind_for_span())
     )]
+    pub async fn stream_raw_transactions(
+        &self,
+        from: StreamFrom,
+    ) -> Result<impl Stream<Item = ConsumedRawTransaction>> {
+        let consumer = self.subscribe(&from)?;
+
+        let (mut tx, rx) = futures::channel::mpsc::channel(1);
+
+        tracing::info!("Starting raw streaming");
+        let topic = self.topic.clone();
+        let from_kind = from.kind_for_span();
+        let stream_span = tracing::info_span!(
+            "stream_raw_transactions_worker",
+            topic = %topic,
+            from = from_kind
+        );
+        tokio::spawn(
+            async move {
+                let mut decompressor = ZstdWrapper::new();
+                let stream = consumer.stream();
+                tokio::pin!(stream);
+                while let Some(message) = stream.next().await {
+                    let message = try_res!(message, "Failed to get message");
+                    let payload = try_opt!(message.payload(), "no payload");
+                    let payload_decompressed = try_res!(
+                        decompressor.decompress(payload),
+                        "Failed decompressing block data"
+                    );
+
+                    tokio::task::yield_now().await;
+
+                    let key = try_opt!(message.key(), "No key");
+
+                    let (block, rx) = ConsumedRawTransaction::new(
+                        key.to_vec(),
+                        payload_decompressed.to_vec(),
+                        message.offset(),
+                        message.partition(),
+                    );
+                    if let Err(e) = tx.send(block).await {
+                        tracing::error!("Failed sending via channel: {:?}", e); //todo panic?
+                        return;
+                    }
+
+                    if rx.await.is_err() {
+                        continue;
+                    }
+
+                    try_res!(
+                        consumer.store_offset_from_message(&message),
+                        "Failed committing"
+                    );
+                    tracing::debug!("Stored offsets");
+                }
+            }
+            .instrument(stream_span),
+        );
+
+        Ok(rx)
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip(self),
+        fields(topic = %self.topic, from = %from.kind_for_span())
+    )]
     pub async fn stream_until_highest_offsets(
         &self,
         from: StreamFrom,
@@ -723,6 +789,52 @@ impl ConsumedTransaction {
     pub fn into_inner_with_commit_channel(
         self,
     ) -> (UInt256, ton_block::Transaction, oneshot::Sender<()>) {
+        (self.id, self.transaction, self.commit_channel.unwrap())
+    }
+}
+
+pub struct ConsumedRawTransaction {
+    pub id: Vec<u8>,
+    pub transaction: Vec<u8>,
+
+    pub offset: i64,
+    pub partition: i32,
+    commit_channel: Option<oneshot::Sender<()>>,
+}
+
+impl ConsumedRawTransaction {
+    fn new(
+        id: Vec<u8>,
+        transaction: Vec<u8>,
+        offset: i64,
+        partition: i32,
+    ) -> (Self, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                id,
+                transaction,
+                offset,
+                partition,
+                commit_channel: Some(tx),
+            },
+            rx,
+        )
+    }
+
+    pub fn commit(mut self) -> Result<()> {
+        let committer = self.commit_channel.take().context("Already committed")?;
+        committer
+            .send(())
+            .map_err(|_| anyhow::anyhow!("Failed committing"))?;
+        Ok(())
+    }
+
+    pub fn into_inner(self) -> (Vec<u8>, Vec<u8>) {
+        (self.id, self.transaction)
+    }
+
+    pub fn into_inner_with_commit_channel(self) -> (Vec<u8>, Vec<u8>, oneshot::Sender<()>) {
         (self.id, self.transaction, self.commit_channel.unwrap())
     }
 }
